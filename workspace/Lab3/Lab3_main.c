@@ -39,11 +39,15 @@ extern uint32_t numRXA;
 uint16_t UARTPrint = 0;
 uint16_t LEDdisplaynum = 0;
 int16_t updown = 1;
-int16_t motorupdown = 1;
+int16_t motorupdown = 1; //amp dbc either 0 or one to let us know ehn to count up or down
+uint16_t songindex = 0;
 
 void setEPWM2A(float controleffort);
 void setEPWM2B(float controleffort);
+void setEPWM8A_RCServo(float angle); //amp dbc predefine functions to prevent errors
+void setEPWM8B_RCServo(float angle);
 
+//amp dbc define global control effort for motor and servo control
 float ctrlEffort = 0;
 
 void main(void)
@@ -253,7 +257,7 @@ void main(void)
     // Configure CPU-Timer 0, 1, and 2 to interrupt every given period:
     // 200MHz CPU Freq,                       Period (in uSeconds)
     ConfigCpuTimer(&CpuTimer0, LAUNCHPAD_CPU_FREQUENCY, 10000);
-    ConfigCpuTimer(&CpuTimer1, LAUNCHPAD_CPU_FREQUENCY, 20000);
+    ConfigCpuTimer(&CpuTimer1, LAUNCHPAD_CPU_FREQUENCY, 125000*4); // amp dbc make the period larger for the song to play at the right tempo
     ConfigCpuTimer(&CpuTimer2, LAUNCHPAD_CPU_FREQUENCY, 500);
 
     // Enable CpuTimer Interrupt bit TIE
@@ -303,19 +307,19 @@ void main(void)
 
     GPIO_SetupPinMux(2, GPIO_MUX_CPU1, 1); //GPIO PinName, CPU, Mux Index
     GPIO_SetupPinMux(3, GPIO_MUX_CPU1, 1); //GPIO PinName, CPU, Mux Index
-    //set gpio 2 to EPWM2A
+    //set gpio 2 to EPWM2Af
     //set gpio 3 to EPWM2B
 
     // amp dbc PWM8A setup
     EPwm8Regs.TBCTL.bit.FREE_SOFT = 0x3; // 11 in bit
     EPwm8Regs.TBCTL.bit.CTRMODE = 0x0; //00 in bit
     EPwm8Regs.TBCTL.bit.PHSEN = 0x0; //0 in bit
-    EPwm8Regs.TBCTL.bit.HSPCLKDIV = 0x0; //000 in bit
+    EPwm8Regs.TBCTL.bit.CLKDIV = 0x4; //100 in bit
 
     EPwm8Regs.TBCTR = 0x0; //000 in bit
-    EPwm8Regs.TBPRD = 2500; //(1/20000)/(1/50000000)
-    EPwm8Regs.CMPA.bit.CMPA = 0;
-    EPwm8Regs.CMPB.bit.CMPB = 0;
+    EPwm8Regs.TBPRD = 62500; //50*10^6/(clkdiv*50)
+    EPwm8Regs.CMPA.bit.CMPA = 62500 * 0.08;
+    EPwm8Regs.CMPB.bit.CMPB = 62500 * 0.08; // amp dbc 8% duty cycle is position 0 on the servo
 
     EPwm8Regs.AQCTLA.bit.CAU = 1; //clearwhen TBCTR = CMPA on up count
     EPwm8Regs.AQCTLB.bit.CBU = 1; //clearwhen TBCTR = CMPB on up count
@@ -334,15 +338,14 @@ void main(void)
     EPwm9Regs.TBCTL.bit.FREE_SOFT = 0x3; // 11 in bit
     EPwm9Regs.TBCTL.bit.CTRMODE = 0x0; //00 in bit
     EPwm9Regs.TBCTL.bit.PHSEN = 0x0; //0 in bit
-    EPwm9Regs.TBCTL.bit.HSPCLKDIV = 0x0; //000 in bit
+    EPwm9Regs.TBCTL.bit.CLKDIV = 0x1; //000 in bit
 
     EPwm9Regs.TBCTR = 0x0; //000 in bit
     EPwm9Regs.TBPRD = 2500; //(1/20000)/(1/50000000)
-    EPwm9Regs.CMPA.bit.CMPA = 0;
+    //EPwm9Regs.CMPA.bit.CMPA = 0;
 
-    EPwm9Regs.AQCTLA.bit.CAU = 1; //clearwhen TBCTR = CMPA on up count
-
-    EPwm9Regs.AQCTLA.bit.ZRO = 2; //set when TBCTR = 0
+    EPwm9Regs.AQCTLA.bit.CAU = 0; //clearwhen TBCTR = CMPA on up count
+    EPwm9Regs.AQCTLA.bit.ZRO = 3; //set when TBCTR = 0
 
     EPwm9Regs.TBPHS.bit.TBPHS = 0; //set phase to 0
 
@@ -374,7 +377,7 @@ void main(void)
     // Enable SWI in the PIE: Group 12 interrupt 9
     PieCtrlRegs.PIEIER12.bit.INTx9 = 1;
 
-    init_serialSCIB(&SerialB, 115200);
+//    init_serialSCIB(&SerialB, 115200);
     init_serialSCIC(&SerialC, 115200);
     init_serialSCID(&SerialD, 115200);
     // Enable global Interrupts and higher priority real-time debug events
@@ -450,6 +453,18 @@ __interrupt void cpu_timer0_isr(void)
 __interrupt void cpu_timer1_isr(void)
 {
 
+    //amp dbc this part of the code reads the array from song.h
+    //from the values of each elem in the array we set the TBPRD to make different pitches
+    //this is using a sqare wave so the duty cycle is fixed but the frequency/period is modulated
+    EPwm9Regs.TBPRD = songarray[songindex];  //song array val at current index
+    if (songindex < SONG_LENGTH) //amp dbc prevents us from going above the array
+        songindex++;
+    else
+    {
+        GPIO_SetupPinMux(16, GPIO_MUX_CPU1, 0);
+        GpioDataRegs.GPACLEAR.bit.GPIO16 = 1;
+        //amp dbc this turns the buzzer pin off when the song ends
+    }
     CpuTimer1.InterruptCount++;
 }
 
@@ -463,26 +478,45 @@ __interrupt void cpu_timer2_isr(void)
 
     if ((CpuTimer2.InterruptCount % 2) == 0)
     {
-        //amp dbc motor control
+        //amp dbc motor control up and down control
+//        if (motorupdown)
+//        {
+//            ctrlEffort += 0.01;
+//        }
+//        else
+//        {
+//            ctrlEffort -= 0.01;
+//        }
+//        if (ctrlEffort > 10)
+//        {
+//            motorupdown = 0;
+//        }
+//        if (ctrlEffort < -10)
+//        {
+//            motorupdown = 1;
+//        }
+//        setEPWM2A(ctrlEffort);
+//        setEPWM2B(-ctrlEffort);
+
+        // amp dbc increment servo up down
         if (motorupdown)
         {
-            ctrlEffort += 0.01;
+            ctrlEffort += 0.05; //step by 0.05
         }
         else
         {
-            ctrlEffort -= 0.01;
+            ctrlEffort -= 0.05;
         }
-        if (ctrlEffort > 10)
+        if (ctrlEffort > 90)
         {
             motorupdown = 0;
         }
-        if (ctrlEffort < -10)
+        if (ctrlEffort < -90)
         {
             motorupdown = 1;
         }
-        setEPWM2A(ctrlEffort);
-        setEPWM2B(-ctrlEffort);
-
+        setEPWM8A_RCServo(ctrlEffort); //amp dbc calls the set servo functions
+        setEPWM8B_RCServo(-ctrlEffort);
 
         //amp dbc gradually increase the led brightness from 0 to 100% and back down forever at 1ms
         if (updown)
@@ -506,6 +540,7 @@ __interrupt void cpu_timer2_isr(void)
 
 }
 
+//amp dbc saturated the motor input and sets the motor velocity
 void setEPWM2A(float controleffort)
 {
     //amp dbc saturate controleffort if too big or too small
@@ -517,10 +552,11 @@ void setEPWM2A(float controleffort)
     {
         controleffort = -10;
     }
-
-    EPwm2Regs.CMPA.bit.CMPA = ((controleffort / 20.0) + 0.5) * EPwm2Regs.TBPRD;
+    // this is a linear mapping
+    EPwm2Regs.CMPA.bit.CMPA = ((controleffort / 20.0) + 0.5) * EPwm2Regs.TBPRD; //note the float division
 }
 
+//amp dbc saturated the motor input and sets the motor velocity
 void setEPWM2B(float controleffort)
 {
     //amp dbc saturate controleffort if too big or too small
@@ -533,6 +569,34 @@ void setEPWM2B(float controleffort)
         controleffort = -10;
     }
 
-    EPwm2Regs.CMPB.bit.CMPB = ((controleffort / 20.0) + 0.5)* EPwm2Regs.TBPRD;
+    EPwm2Regs.CMPB.bit.CMPB = ((controleffort / 20.0) + 0.5) * EPwm2Regs.TBPRD;
 }
 
+//amp dbc saturated the servo input and sets the servo position
+void setEPWM8A_RCServo(float angle)
+{
+    if (angle > 90)
+        angle = 90;
+    if (angle < -90)
+        angle = -90;
+
+    angle = (angle + 90) / 180.0; //brings angle between 0 and 1 amp dbc
+    angle = angle * 8.0 + 4; //between 4 and 12
+
+    EPwm8Regs.CMPA.bit.CMPA = 62500 * angle / 100.0;
+
+}
+
+//amp dbc saturated the servo input and sets the servo position
+void setEPWM8B_RCServo(float angle)
+{
+    if (angle > 90)
+        angle = 90;
+    if (angle < -90)
+        angle = -90;
+
+    angle = (angle + 90) / 180.0; //brings angle between 0 and 1 amp dbc
+    angle = angle * 8.0 + 4; //between 4 and 12
+
+    EPwm8Regs.CMPB.bit.CMPB = 62500 * angle / 100.0;
+}
